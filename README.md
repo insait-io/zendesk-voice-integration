@@ -10,6 +10,9 @@
 
 </br>
 
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=insait-io_zendesk-voice-integration&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=insait-io_zendesk-voice-integration)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=insait-io_zendesk-voice-integration&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=insait-io_zendesk-voice-integration)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=insait-io_zendesk-voice-integration&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=insait-io_zendesk-voice-integration)
 </div>
 
 # Zendesk Voice Integration Server

@@ -8,6 +8,7 @@ This script sets up the environment and runs all tests with proper coverage repo
 import os
 import sys
 import subprocess
+import re
 import unittest
 from pathlib import Path
 
@@ -59,33 +60,75 @@ def run_tests():
         
         # Generate HTML coverage report
         cov.html_report(directory='htmlcov')
-        print(f"\n📁 HTML coverage report generated in: htmlcov/index.html")
+        print("\n📁 HTML coverage report generated in: htmlcov/index.html")
     
     # Return exit code
     return 0 if result.wasSuccessful() else 1
 
 def run_specific_test(test_file):
-    """Run a specific test file."""
+    """Run a specific test file with strict security validation."""
+    # Comprehensive input validation and sanitization to prevent path traversal
+    if not test_file or not isinstance(test_file, str):
+        print("❌ Invalid test file input")
+        return 1
+    
+    # Remove any path components to prevent directory traversal
+    test_file = os.path.basename(test_file)
+    
+    # Strict whitelist validation - only allow alphanumeric, underscore, dot
+    if not re.match(r'^[a-zA-Z0-9_\.]+$', test_file):
+        print(f"❌ Invalid test file name format: {test_file}")
+        return 1
+    
+    # Must follow test file naming convention
+    if not test_file.startswith('test_') or not test_file.endswith('.py'):
+        print(f"❌ Test file must start with 'test_' and end with '.py': {test_file}")
+        return 1
+    
     print(f"🧪 Running specific test: {test_file}")
     print("=" * 50)
     
-    test_path = os.path.join(os.path.dirname(__file__), 'tests', test_file)
+    # Construct and validate the full path
+    tests_dir = os.path.join(os.path.dirname(__file__), 'tests')
+    tests_dir = os.path.abspath(tests_dir)  # Get absolute path
+    test_path = os.path.join(tests_dir, test_file)
+    test_path = os.path.abspath(test_path)  # Get absolute path
+    
+    # Ensure the test file is within the tests directory (prevent path traversal)
+    if not test_path.startswith(tests_dir + os.sep):
+        print(f"❌ Test file must be in tests directory: {test_file}")
+        return 1
+    
+    # Verify file exists
     if not os.path.exists(test_path):
         print(f"❌ Test file not found: {test_path}")
         return 1
     
-    # Run the specific test
-    result = subprocess.run([
-        sys.executable, '-m', 'unittest', test_path
-    ], cwd=os.path.dirname(__file__))
-    
-    return result.returncode
+    # Run the specific test with safe arguments - no shell injection possible
+    try:
+        result = subprocess.run([
+            sys.executable, '-m', 'unittest', f'tests.{test_file[:-3]}'  # Use module path instead of file path
+        ], cwd=os.path.dirname(__file__), timeout=300, shell=False, capture_output=False)  # Explicitly disable shell
+        
+        return result.returncode
+    except subprocess.TimeoutExpired:
+        print("❌ Test execution timed out")
+        return 1
+    except Exception as e:
+        print(f"❌ Error running test: {e}")
+        return 1
 
 def main():
     """Main function to handle command line arguments."""
     if len(sys.argv) > 1:
-        # Run specific test file
-        test_file = sys.argv[1]
+        # Run specific test file - sanitize input
+        test_file = sys.argv[1].strip()
+        
+        # Basic validation - only allow safe characters
+        if not test_file or '..' in test_file or '/' in test_file or '\\' in test_file:
+            print("❌ Invalid test file name")
+            sys.exit(1)
+            
         if not test_file.endswith('.py'):
             test_file += '.py'
         exit_code = run_specific_test(test_file)

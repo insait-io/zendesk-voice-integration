@@ -26,8 +26,20 @@ gcloud services enable cloudbuild.googleapis.com
 # Enable Firestore API
 gcloud services enable firestore.googleapis.com
 
+# Enable Secret Manager API (REQUIRED for environment secrets)
+gcloud services enable secretmanager.googleapis.com
+
 # Enable Cloud Resource Manager API (for project management)
 gcloud services enable cloudresourcemanager.googleapis.com
+
+# Enable all APIs at once (alternative command)
+gcloud services enable \
+  run.googleapis.com \
+  containerregistry.googleapis.com \
+  cloudbuild.googleapis.com \
+  firestore.googleapis.com \
+  secretmanager.googleapis.com \
+  cloudresourcemanager.googleapis.com
 ```
 
 ### 2. Set Up Firestore Database
@@ -36,10 +48,10 @@ Create and configure Firestore database:
 
 ```bash
 # Create Firestore database in native mode (recommended)
-gcloud firestore databases create --region=us-central1
+gcloud firestore databases create --location=us-central1
 
-# Alternative: Create in a specific region closer to your users
-# gcloud firestore databases create --region=europe-west1
+# Alternative: Create in a specific location closer to your users
+# gcloud firestore databases create --location=europe-west1
 
 # Verify Firestore is enabled
 gcloud firestore databases list
@@ -78,11 +90,12 @@ ZENDESK_DOMAIN: "your-domain.zendesk.com"
 ZENDESK_EMAIL: "your-email@example.com"
 ZENDESK_API_TOKEN: "your-zendesk-api-token"
 GOOGLE_CLOUD_PROJECT: "your-gcp-project-id"
-PORT: "8080"
 FLASK_ENV: "production"
 ALLOWED_PHONE_NUMBERS: "+15551234567,+15559876543"
 LOG_LEVEL: "INFO"
 ```
+
+**Note:** The `PORT` environment variable is automatically set by Google Cloud Run and should not be manually configured.
 
 ### 5. Build and Deploy
 
@@ -161,7 +174,7 @@ gcloud run deploy zendesk-voice-server \
   --region us-central1 \
   --service-account zendesk-voice-server@YOUR_PROJECT_ID.iam.gserviceaccount.com \
   --set-secrets ZENDESK_API_TOKEN=zendesk-api-token:latest,ZENDESK_EMAIL=zendesk-email:latest,ZENDESK_DOMAIN=zendesk-domain:latest \
-  --set-env-vars GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,PORT=8080,FLASK_ENV=production,LOG_LEVEL=INFO \
+  --set-env-vars GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID,FLASK_ENV=production,LOG_LEVEL=INFO \
   --memory 1Gi \
   --cpu 1 \
   --max-instances 10 \
@@ -169,7 +182,67 @@ gcloud run deploy zendesk-voice-server \
   --no-allow-unauthenticated
 ```
 
-### 7. Set Up Firestore Security Rules
+### 7. Create Service Account for API Access
+
+Create a service account that can be used to trigger the Cloud Run service from external systems or for testing:
+
+```bash
+# Create service account for API access
+gcloud iam service-accounts create zendesk-api-client \
+  --display-name="Zendesk API Client" \
+  --description="Service account for accessing Zendesk Voice Server API"
+
+# Grant the service account permission to invoke the Cloud Run service
+gcloud run services add-iam-policy-binding zendesk-voice-server \
+  --region=us-central1 \
+  --member="serviceAccount:zendesk-api-client@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+# Create and download a key for the service account (for external systems)
+gcloud iam service-accounts keys create zendesk-api-client-key.json \
+  --iam-account=zendesk-api-client@YOUR_PROJECT_ID.iam.gserviceaccount.com
+
+# Store the key securely and use it to generate identity tokens
+# Example: Generate an identity token for API calls
+gcloud auth activate-service-account --key-file=zendesk-api-client-key.json
+gcloud auth print-identity-token --audiences=https://zendesk-voice-server-f4sffiqfgq-uc.a.run.app
+```
+
+**Usage Example:**
+```bash
+# Get identity token
+TOKEN=$(gcloud auth print-identity-token --audiences=https://zendesk-voice-server-f4sffiqfgq-uc.a.run.app)
+
+# Make authenticated API call
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     https://zendesk-voice-server-f4sffiqfgq-uc.a.run.app/health
+```
+
+### Alternative: Make Service Public (for Webhooks)
+
+If you need the service to be accessible by external webhooks (like Zendesk Voice), you can make it public:
+
+```bash
+# WARNING: This removes authentication requirements
+# Only do this if you have application-level security measures
+
+gcloud run services add-iam-policy-binding zendesk-voice-server \
+  --region=us-central1 \
+  --member="allUsers" \
+  --role="roles/run.invoker"
+
+# Your service will then be accessible at:
+# https://zendesk-voice-server-f4sffiqfgq-uc.a.run.app
+```
+
+**Security Note**: When making the service public, ensure your application has proper:
+- Input validation
+- Rate limiting (already implemented with flask-limiter)
+- Request signature verification
+- IP allowlisting if possible
+
+### 8. Set Up Firestore Security Rules
 
 Create security rules for Firestore:
 
@@ -340,19 +413,51 @@ gcloud alpha monitoring policies create --policy-from-file=monitoring-policy.yam
 
 ### Common Issues
 
-1. **Build Failures**
+1. **Deployment Error: Secret Manager API Not Enabled**
+   ```
+   ERROR: Secret Manager API has not been used in project [PROJECT_ID] before or it is disabled
+   ```
+   
+   **Solution**: Enable the Secret Manager API and wait a few minutes for propagation.
+   
+   ```bash
+   # Enable Secret Manager API
+   gcloud services enable secretmanager.googleapis.com
+   
+   # Check if API is enabled
+   gcloud services list --enabled --filter="name:secretmanager.googleapis.com"
+   
+   # Wait 2-3 minutes then retry deployment
+   ```
+
+2. **Deployment Error: Reserved ENV Names (PORT)**
+   ```
+   ERROR: spec.template.spec.containers[0].env: The following reserved env names were provided: PORT
+   ```
+   
+   **Solution**: Remove `PORT` from your environment variables. Cloud Run automatically sets the PORT environment variable.
+   
+   ```bash
+   # ❌ Incorrect - Do not set PORT
+   --set-env-vars PORT=8080,FLASK_ENV=production
+   
+   # ✅ Correct - Let Cloud Run set PORT automatically
+   --set-env-vars FLASK_ENV=production
+   ```
+
+2. **Build Failures**
    ```bash
    # Check build logs
    gcloud builds log BUILD_ID
    ```
 
-2. **Runtime Errors**
+3. **Runtime Errors**
    ```bash
    # Check service logs
    gcloud logs read "resource.type=cloud_run_revision AND resource.labels.service_name=zendesk-voice-server" --limit=50
    ```
 
-3. **Environment Variables**
+4. **Environment Variables**
    ```bash
    # Verify environment variables
    gcloud run services describe zendesk-voice-server --format="value(spec.template.spec.containers[0].env)"

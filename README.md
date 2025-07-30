@@ -12,7 +12,7 @@
 
 </div>
 
-# Zendesk Voice Server
+# Zendesk Voice Integration Server
 
 A secure Flask-based server for automatically creating Zendesk tickets from voice call events. This application integrates with voice call services to process call data and create support tickets in Zendesk with enterprise-grade security features.
 
@@ -21,314 +21,174 @@ A secure Flask-based server for automatically creating Zendesk tickets from voic
 - **Automatic Ticket Creation**: Creates Zendesk tickets from voice call events
 - **Enhanced Security**: Comprehensive security measures including rate limiting, input validation, and HTTPS enforcement
 - **Phone Number Filtering**: Optional restriction of API access to authorized phone numbers
-- **User Management**: Handles existing and new users based on phone numbers
-- **Call Processing**: Processes call start/end events with duplicate detection
 - **Firestore Integration**: Secure cloud-native storage for processed calls and active tickets
-- **Comprehensive Logging**: Detailed logging with data sanitization for privacy
-- **RESTful API**: Clean, secure API endpoints with proper error handling
 - **Production Ready**: Enterprise-grade security and deployment configuration
 
-## Security Features
+## Quick Deployment to Google Cloud Run
 
-- **Input Validation**: Comprehensive validation and sanitization of all inputs
-- **Rate Limiting**: Configurable rate limits to prevent abuse
-- **Security Headers**: Full suite of security headers for web protection
-- **Data Sanitization**: Phone numbers and sensitive data are masked in logs
-- **Request Size Limits**: Protection against large payload attacks
-- **Content Type Validation**: Strict JSON content type enforcement
-- **Authentication Support**: Ready for production authentication integration
-- **Secret Management**: Google Secret Manager integration for sensitive data
+### Prerequisites
 
-## Project Structure
+- Google Cloud Project with billing enabled
+- `gcloud` CLI installed and authenticated
+- Docker installed (for local testing)
 
-```
-zendesk-voice-server/
-├── src/
-│   ├── zendesk/
-│   │   ├── __init__.py
-│   │   └── api.py              # Secure Zendesk API client
-│   ├── server/
-│   │   ├── __init__.py
-│   │   └── app.py              # Secure Flask application
-│   ├── utils/
-│   │   ├── __init__.py
-│   │   ├── helpers.py          # Utility functions
-│   │   └── security.py         # Security configuration
-│   └── __init__.py
-├── tests/
-│   ├── __init__.py
-│   ├── test_zendesk_api.py     # Zendesk API tests
-│   ├── test_server.py          # Server endpoint and security tests
-│   └── test_utils.py           # Utility function tests
-├── config/
-│   └── settings.py             # Configuration settings
-├── docs/                       # Documentation
-├── app.py                      # Main application entry point
-├── requirements.txt             # Python dependencies
-├── README.md                   # This file
-└── .gitignore                  # Git ignore file
-```
+### 1. Setup Google Cloud Environment
 
-## Installation
-
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd zendesk-voice-server
-   ```
-
-2. **Create a virtual environment**:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Set up environment variables**:
-   Copy the example environment file and configure your settings:
-   ```bash
-   cp env.example .env
-   ```
-   
-   Edit the `.env` file with your actual credentials:
-   ```env
-   # Zendesk Configuration
-   ZENDESK_DOMAIN=your-domain.zendesk.com
-   ZENDESK_EMAIL=your-email@example.com
-   ZENDESK_API_TOKEN=your-api-token
-   
-   # Google Cloud Configuration
-   GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account-key.json
-   GOOGLE_CLOUD_PROJECT=your-gcp-project-id
-   
-   # Server Configuration
-   PORT=8080
-   FLASK_ENV=production
-   
-   # Security Configuration
-   ALLOWED_PHONE_NUMBERS=+15551234567,+15559876543
-   ```
-
-5. **Set up Google Cloud Firestore**:
-   - Create a Google Cloud Project
-   - Enable Firestore API
-   - Create a service account with Firestore permissions
-   - Download the service account key JSON file
-
-## Security
-
-⚠️ **Enhanced Security Features**:
-
-- **Input Validation**: All inputs are validated and sanitized
-- **Rate Limiting**: Built-in protection against abuse and DoS attacks
-- **Security Headers**: Comprehensive HTTP security headers
-- **Data Sanitization**: Sensitive data is masked in logs and outputs
-- **Secret Management**: Integration with Google Secret Manager
-- **HTTPS Enforcement**: Secure communication protocols
-- **Authentication Ready**: Prepared for production authentication
-
-**Security Files to Protect**:
-- `.env` files (environment variables)
-- Service account JSON files
-- `venv/` directory (virtual environment)
-- Log files containing sensitive data
-
-**Production Security Requirements**:
-- Use Google Secret Manager for sensitive data
-- Enable authentication on all endpoints
-- Configure VPC networking for internal communication
-- Set up monitoring and alerting
-- Regular security updates and vulnerability scanning
-
-## Usage
-
-### Running the Server
-
-**Development mode**:
 ```bash
-export FLASK_ENV=development
-python app.py
+# Set your project ID
+export PROJECT_ID="your-project-id"
+gcloud config set project $PROJECT_ID
+
+# Enable required APIs
+gcloud services enable run.googleapis.com
+gcloud services enable cloudbuild.googleapis.com
+gcloud services enable firestore.googleapis.com
+gcloud services enable secretmanager.googleapis.com
 ```
 
-**Production mode** (using gunicorn):
+### 2. Create Firestore Database
+
 ```bash
-export FLASK_ENV=production
-gunicorn -w 4 -b 0.0.0.0:8080 --timeout 300 --keep-alive 5 app:app
+# Create Firestore database
+gcloud firestore databases create --region=us-central1
+```
+
+### 3. Create Service Account
+
+```bash
+# Create service account for the application
+gcloud iam service-accounts create zendesk-voice-server \
+  --display-name="Zendesk Voice Server" \
+  --description="Service account for Zendesk Voice Integration Server"
+
+# Grant necessary permissions
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:zendesk-voice-server@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/datastore.user"
+
+gcloud projects add-iam-policy-binding $PROJECT_ID \
+  --member="serviceAccount:zendesk-voice-server@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+```
+
+### 4. Store Secrets in Secret Manager
+
+```bash
+# Create secrets for Zendesk credentials
+echo -n "your-domain.zendesk.com" | gcloud secrets create zendesk-domain --data-file=-
+echo -n "your-email@example.com" | gcloud secrets create zendesk-email --data-file=-
+echo -n "your-api-token" | gcloud secrets create zendesk-api-token --data-file=-
+```
+
+### 5. Deploy to Cloud Run
+
+```bash
+# Deploy the service
+gcloud run deploy zendesk-voice-server \
+  --source . \
+  --platform managed \
+  --region us-central1 \
+  --service-account zendesk-voice-server@$PROJECT_ID.iam.gserviceaccount.com \
+  --set-secrets ZENDESK_API_TOKEN=zendesk-api-token:latest,ZENDESK_EMAIL=zendesk-email:latest,ZENDESK_DOMAIN=zendesk-domain:latest \
+  --set-env-vars GOOGLE_CLOUD_PROJECT=$PROJECT_ID,FLASK_ENV=production,LOG_LEVEL=INFO \
+  --memory 1Gi \
+  --cpu 1 \
+  --max-instances 10 \
+  --timeout 300 \
+  --no-allow-unauthenticated
+```
+
+### 6. Create API Access Service Account
+
+```bash
+# Create service account for API access
+gcloud iam service-accounts create zendesk-api-client \
+  --display-name="Zendesk API Client" \
+  --description="Service account for accessing Zendesk Voice Server API"
+
+# Grant permission to invoke Cloud Run service
+gcloud run services add-iam-policy-binding zendesk-voice-server \
+  --region=us-central1 \
+  --member="serviceAccount:zendesk-api-client@$PROJECT_ID.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+
+# Create and download credentials file
+gcloud iam service-accounts keys create zendesk-api-client-key.json \
+  --iam-account=zendesk-api-client@$PROJECT_ID.iam.gserviceaccount.com
+```
+
+### 7. Send Credentials to Insait
+
+**⚠️ IMPORTANT**: After creating the service account and downloading the JSON credentials file (`zendesk-api-client-key.json`), please send this file securely to Insait for API integration setup.
+
+The credentials file contains the authentication keys needed to access your Cloud Run service programmatically.
+
+## API Usage
+
+Once deployed, your service will be available at:
+```
+https://zendesk-voice-server-[hash]-uc.a.run.app
+```
+
+### Authentication
+
+All API calls require authentication using the service account:
+
+```bash
+# Authenticate with service account
+gcloud auth activate-service-account --key-file=zendesk-api-client-key.json
+
+# Generate identity token
+TOKEN=$(gcloud auth print-identity-token --audiences=https://your-service-url)
+
+# Make API call
+curl -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     https://your-service-url/health
 ```
 
 ### API Endpoints
 
-#### 1. Call Events Manager
-**POST** `/call_events_manager`
+- **GET** `/health` - Health check endpoint
+- **POST** `/call-events` - Process voice call events and create Zendesk tickets
 
-Processes voice call events and creates Zendesk tickets.
-
-**Request Body**:
-```json
-{
-  "call": {
-    "call_id": "call_123",
-    "from_number": "+15551234567",
-    "call_status": "ended",
-    "start_timestamp": 1640995200000,
-    "end_timestamp": 1640995260000,
-    "duration_ms": 60000,
-    "transcript": "User: Hello\nAgent: Hi, how can I help you?",
-    "call_analysis": {
-      "call_summary": "Customer called for support",
-      "custom_analysis_data": {
-        "name_of_caller": "John Doe",
-        "email_to_reach": "john@example.com"
-      }
-    }
-  }
-}
-```
-
-**Response**:
-```json
-{
-  "success": true,
-  "ticket_id": 12345,
-  "message": "Created Zendesk ticket 12345"
-}
-```
-
-#### 2. Manual Ticket Creation
-**POST** `/create_zendesk_ticket`
-
-Manually create a Zendesk ticket for testing purposes.
-
-**Request Body**:
-```json
-{
-  "subject": "Test Ticket",
-  "description": "Test description",
-  "requester_phone": "+15551234567",
-  "tags": ["test", "voice-call"],
-  "public": false
-}
-```
-
-#### 3. Zendesk Flow Test
-**GET** `/test_zendesk_flow`
-
-Test the Zendesk integration by creating and updating a test ticket.
-
-#### 4. Health Check
-**GET** `/health`
-
-Check the server health status.
-
-### Running Tests
+## Local Development
 
 ```bash
-# Run all tests
-python -m unittest discover tests
+# Clone repository
+git clone <repository-url>
+cd zendesk-voice-integration
 
-# Run specific test file
-python -m unittest tests.test_zendesk_api
+# Setup virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Run with coverage
-pip install coverage
-coverage run -m unittest discover tests
-coverage report
+# Install dependencies
+pip install -r requirements.txt
+
+# Setup local environment
+cp env.example .env
+# Edit .env with your credentials
+
+# Download service account key for local development
+gcloud iam service-accounts keys create ./config/service-account-key.json \
+  --iam-account=zendesk-voice-server@$PROJECT_ID.iam.gserviceaccount.com
+
+# Run locally
+python app.py
 ```
 
-## Configuration
+## Security Features
 
-The application uses a configuration system with different environments:
-
-- **Development**: Debug mode, detailed logging
-- **Production**: Optimized for production use
-- **Testing**: Test-specific settings
-
-Configuration is managed in `config/settings.py` and can be customized via environment variables.
-
-## Key Components
-
-### Zendesk API (`src/zendesk/api.py`)
-- Handles all Zendesk API interactions
-- Manages ticket creation, updates, and user operations
-- Includes user search and management functionality
-
-### Flask Server (`src/server/app.py`)
-- Main Flask application with API endpoints
-- Processes call events and manages ticket creation
-- Integrates with Firebase for data persistence
-
-### Utility Functions (`src/utils/helpers.py`)
-- Phone number validation and cleaning
-- Call data formatting
-- Ticket subject and description generation
-- Tag sanitization
-
-## Development
-
-### Adding New Features
-
-1. **Create new modules** in the appropriate `src/` subdirectory
-2. **Add tests** in the corresponding `tests/` file
-3. **Update documentation** in the `docs/` directory
-4. **Follow the existing code structure** and patterns
-
-### Code Style
-
-- Follow PEP 8 guidelines
-- Use type hints where appropriate
-- Include docstrings for all functions and classes
-- Write comprehensive tests for new functionality
-
-## Deployment
-
-### Docker Deployment
-
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-
-COPY . .
-EXPOSE 5000
-
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:5000", "app:app"]
-```
-
-### Environment Variables
-
-Make sure to set all required environment variables in your deployment environment:
-
-**Required:**
-- `ZENDESK_DOMAIN`
-- `ZENDESK_EMAIL`
-- `ZENDESK_API_TOKEN`
-- `FIREBASE_CREDENTIALS_FILE`
-
-**Optional:**
-- `PORT` - Server port (default: 5000)
-- `ALLOWED_PHONE_NUMBERS` - Comma-separated list of authorized phone numbers. If not set, all phone numbers are allowed.
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests for new functionality
-5. Run the test suite
-6. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
+- **Input Validation**: Comprehensive validation and sanitization of all inputs
+- **Rate Limiting**: Built-in protection against abuse and DoS attacks
+- **Security Headers**: Full suite of security headers for web protection
+- **Data Sanitization**: Phone numbers and sensitive data are masked in logs
+- **Secret Management**: Google Secret Manager integration for sensitive data
+- **Authentication**: Identity token-based authentication for all API access
 
 ## Support
 
-For support and questions, please contact the development team or create an issue in the repository.
+For technical support and integration questions, please contact the Insait development team.
 
 

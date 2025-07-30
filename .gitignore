@@ -129,12 +129,22 @@ celerybeat.pid
 
 # Environments
 .env
+.env.yaml
 .venv
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Google Cloud Service Account Keys
+service-account-key.json
+config/service-account-key.json
+zendesk-api-client-key.json
+auth_token.py
+generate_token.py
+# Token generation scripts (optional)
+*token*.py
 
 # Spyder project settings
 .spyderproject

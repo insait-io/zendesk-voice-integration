@@ -2,16 +2,21 @@ import os
 import logging
 import time
 import re
+import sys
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 from google.cloud import firestore
-from google.api_core.exceptions import GoogleCloudError
+from google.api_core.exceptions import GoogleAPIError
 import json
 
-from zendesk.api import ZendeskAPI
+# Add the src directory to the Python path for relative imports  
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
+
+from src.zendesk.api import ZendeskAPI
+from src.utils.logging_utils import sanitize_for_logging, safe_log_info, safe_log_warning, safe_log_error, safe_log_debug
 
 load_dotenv()
 
@@ -128,9 +133,9 @@ firestore_client = None
 try:
     # Initialize Firestore client
     firestore_client = firestore.Client()
-    logging.info("Firestore initialized successfully")
+    safe_log_info("Firestore initialized successfully")
 except Exception as e:
-    logging.warning(f"Firestore initialization failed: {e}. Continuing without Firestore.")
+    safe_log_warning(f"Firestore initialization failed: {sanitize_for_logging(str(e))}. Continuing without Firestore.")
     firestore_client = None
 
 app = Flask(__name__)
@@ -167,8 +172,8 @@ def store_processed_call(event_call_key, event, call_id):
             'call_id': call_id
         })
         return True
-    except GoogleCloudError as e:
-        logging.error(f"Error storing processed call: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error storing processed call: {sanitize_for_logging(str(e))}")
         return False
 
 def check_processed_call(event_call_key):
@@ -180,8 +185,8 @@ def check_processed_call(event_call_key):
         doc_ref = firestore_client.collection('processed_calls').document(event_call_key)
         doc = doc_ref.get()
         return doc.exists
-    except GoogleCloudError as e:
-        logging.error(f"Error checking processed call: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error checking processed call: {sanitize_for_logging(str(e))}")
         return False
 
 def store_active_ticket(phone_number, ticket_id):
@@ -196,8 +201,8 @@ def store_active_ticket(phone_number, ticket_id):
             'timestamp': datetime.now()
         })
         return True
-    except GoogleCloudError as e:
-        logging.error(f"Error storing active ticket: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error storing active ticket: {sanitize_for_logging(str(e))}")
         return False
 
 def get_active_ticket(phone_number):
@@ -212,8 +217,8 @@ def get_active_ticket(phone_number):
             data = doc.to_dict()
             return data.get('ticket_id')
         return None
-    except GoogleCloudError as e:
-        logging.error(f"Error getting active ticket: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error getting active ticket: {sanitize_for_logging(str(e))}")
         return None
 
 def remove_active_ticket(phone_number):
@@ -225,8 +230,8 @@ def remove_active_ticket(phone_number):
         doc_ref = firestore_client.collection('active_tickets').document(phone_number)
         doc_ref.delete()
         return True
-    except GoogleCloudError as e:
-        logging.error(f"Error removing active ticket: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error removing active ticket: {sanitize_for_logging(str(e))}")
         return False
 
 def get_all_active_tickets():
@@ -241,11 +246,182 @@ def get_all_active_tickets():
             data = doc.to_dict()
             active_tickets[doc.id] = data.get('ticket_id')
         return active_tickets
-    except GoogleCloudError as e:
-        logging.error(f"Error getting all active tickets: {e}")
+    except GoogleAPIError as e:
+        safe_log_error(f"Error getting all active tickets: {sanitize_for_logging(str(e))}")
         return {}
 
 
+
+def _validate_request():
+    """Validate incoming request size and content type."""
+    # Validate request size (max 1MB)
+    if request.content_length and request.content_length > 1024 * 1024:
+        safe_log_warning("Request too large")
+        return jsonify({"error": "Request too large"}), 413
+    
+    # Validate content type
+    if not request.is_json:
+        safe_log_warning("Invalid content type")
+        return jsonify({"error": "Content-Type must be application/json"}), 400
+    
+    return None
+
+def _validate_and_extract_call_data():
+    """Validate and extract call data from request."""
+    data = request.json
+    
+    # Validate input data
+    is_valid, error_message = validate_call_data(data)
+    if not is_valid:
+        safe_log_warning(f"Invalid call data: {sanitize_for_logging(error_message)}")
+        return None, jsonify({"error": error_message}), 400
+    
+    call_id = data.get('call', {}).get('call_id')
+    event = data.get('event')
+    phone = data['call']['from_number']
+    
+    return (call_id, event, phone, data), None, None
+
+def _check_authorization_and_duplicates(phone, event, call_id):
+    """Check phone number authorization and duplicate processing."""
+    sanitized_phone = sanitize_phone_number(phone)
+    
+    if not is_phone_number_allowed(phone):
+        safe_log_warning(f"Phone number {sanitized_phone} is not in the allowed list")
+        return None, jsonify({
+            "error": "Phone number not authorized", 
+            "message": "This phone number is not authorized to create tickets"
+        }), 403
+    
+    event_call_key = f"{event}_{call_id}"
+    
+    # Check for duplicate processing using Firestore
+    if check_processed_call(event_call_key):
+        safe_log_info(f"Duplicate event-call pair detected: {sanitize_for_logging(event_call_key)}, ignoring request.")
+        return None, jsonify({"message": "Duplicate event-call pair, ignored"}), 200
+    
+    # Store processed call
+    store_processed_call(event_call_key, event, call_id)
+    
+    return sanitized_phone, None, None
+
+def _handle_call_started(zendesk, data, phone, call_id):
+    """Handle call_started event."""
+    sanitized_phone = sanitize_phone_number(phone)
+    start_time = datetime.fromtimestamp(data['call']['start_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    initial_description = f"""
+Ongoing Call Information:
+- Phone: {phone}
+- Call Start Time: {start_time}
+- Call Status: In Progress
+- Call ID: {call_id}
+
+Note: This ticket will be updated with full call details when the call ends.
+"""
+    
+    result = zendesk.create_ticket(
+        subject=f"Ongoing Call with {sanitized_phone}",
+        description=initial_description,
+        requester_phone=phone,
+        tags=["call", "insait-ai-agent", "in-progress"]
+    )
+    
+    if result and 'ticket' in result:
+        # Store active ticket in Firestore
+        store_active_ticket(phone, result['ticket']['id'])
+        safe_log_info(f"Created initial ticket {sanitize_for_logging(str(result['ticket']['id']))} for {sanitized_phone}")
+        
+        # Get current active tickets for logging (without sensitive data)
+        current_active = get_all_active_tickets()
+        safe_log_info(f"Current active_tickets count in Firestore: {sanitize_for_logging(str(len(current_active)))}")
+        
+        return jsonify({
+            "message": "Initial ticket created successfully", 
+            "ticket": result
+        }), 201
+    else:
+        safe_log_error("Failed to create initial Zendesk ticket")
+        return jsonify({"error": "Failed to create initial ticket"}), 500
+
+def _handle_call_ended(zendesk, data, phone):
+    """Handle call_ended event."""
+    sanitized_phone = sanitize_phone_number(phone)
+    
+    # Get current active tickets count for logging
+    current_active = get_all_active_tickets()
+    safe_log_info(f"Current active_tickets count at call_ended: {sanitize_for_logging(str(len(current_active)))}")
+    
+    # Retry logic for finding ticket
+    ticket_id = _retry_get_active_ticket(phone, sanitized_phone)
+    
+    if not ticket_id:
+        return _create_new_ticket_for_ended_call(zendesk, data, phone, sanitized_phone)
+    else:
+        return _update_existing_ticket(zendesk, data, phone, sanitized_phone, ticket_id)
+
+def _retry_get_active_ticket(phone, sanitized_phone):
+    """Retry getting active ticket with exponential backoff."""
+    ticket_id = get_active_ticket(phone)
+    retry_count = 0
+    max_retries = 5
+    
+    while not ticket_id and retry_count < max_retries:
+        safe_log_info(f"Attempt {retry_count + 1}/{max_retries}: No active ticket found for phone number {sanitized_phone}")
+        time.sleep(10)
+        ticket_id = get_active_ticket(phone)
+        retry_count += 1
+    
+    return ticket_id
+
+def _create_new_ticket_for_ended_call(zendesk, data, phone, sanitized_phone):
+    """Create a new ticket for ended call when no active ticket is found."""
+    safe_log_info(f"No active ticket found for {sanitized_phone} after 5 attempts, creating new ticket")
+    start_time = datetime.fromtimestamp(data['call']['start_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    end_time = datetime.fromtimestamp(data['call']['end_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    description = f"""
+Completed Call Information:
+- Phone: {phone}
+- Call Start Time: {start_time}
+- Call End Time: {end_time}
+- Recording URL: {data['call'].get('recording_url', 'Not available')}
+- Transcript: {data['call'].get('transcript', 'Not available')}
+"""
+    return zendesk.create_ticket(
+        subject=f"Completed Call with {sanitized_phone}",
+        description=description,
+        requester_phone=phone,
+        tags=["call", "insait-ai-agent", "completed"]
+    )
+
+def _update_existing_ticket(zendesk, data, phone, sanitized_phone, ticket_id):
+    """Update existing ticket with call completion details."""
+    safe_log_info(f"Found existing ticket {sanitize_for_logging(str(ticket_id))} for phone number {sanitized_phone}, proceeding with update")
+    end_time = datetime.fromtimestamp(data['call']['end_timestamp'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    
+    update_description = f"""
+Call Completed - Updated Information:
+- Call End Time: {end_time}
+- Call Duration: {data['call']['duration_ms'] / 1000} seconds
+- Recording URL: {data['call'].get('recording_url', 'Not available')}
+- Transcript: {data['call'].get('transcript', 'Not available')}
+"""
+    
+    result = zendesk.update_ticket(
+        ticket_id=ticket_id,
+        subject=f"Completed Call with {sanitized_phone}",
+        description=update_description,
+        tags=["call", "insait-ai-agent", "completed"],
+        status="open"
+    )
+    
+    # Remove active ticket from Firestore
+    remove_active_ticket(phone)
+    current_active = get_all_active_tickets()
+    safe_log_info(f"Removed ticket for {sanitized_phone}. Current active_tickets count: {sanitize_for_logging(str(len(current_active)))}")
+    
+    return result
 
 @app.route("/create_zendesk_ticket", methods=["POST"])
 @limiter.limit("10 per minute")
@@ -261,164 +437,52 @@ def create_zendesk_ticket():
     - If ALLOWED_PHONE_NUMBERS is not set, all phone numbers are allowed
     """
     try:
-        # Validate request size (max 1MB)
-        if request.content_length and request.content_length > 1024 * 1024:
-            logging.warning("Request too large")
-            return jsonify({"error": "Request too large"}), 413
+        # Validate request
+        validation_error = _validate_request()
+        if validation_error:
+            return validation_error
         
-        # Validate content type
-        if not request.is_json:
-            logging.warning("Invalid content type")
-            return jsonify({"error": "Content-Type must be application/json"}), 400
+        safe_log_info("Received request to create/update Zendesk ticket")
         
-        logging.info("Received request to create/update Zendesk ticket")
-        data = request.json
+        # Extract and validate call data
+        result = _validate_and_extract_call_data()
+        if result[1]:  # Error response exists
+            return result[1], result[2]
         
-        # Validate input data
-        is_valid, error_message = validate_call_data(data)
-        if not is_valid:
-            logging.warning(f"Invalid call data: {error_message}")
-            return jsonify({"error": error_message}), 400
-        
-        call_id = data.get('call', {}).get('call_id')
-        event = data.get('event')
-        phone = data['call']['from_number']
+        call_id, event, phone, data = result[0]
         
         # Sanitize phone number for logging
         sanitized_phone = sanitize_phone_number(phone)
-        logging.info(f"Processing {event} for caller: {sanitized_phone}")
+        safe_log_info(f"Processing {sanitize_for_logging(event)} for caller: {sanitized_phone}")
 
-        if not is_phone_number_allowed(phone):
-            logging.warning(f"Phone number {sanitized_phone} is not in the allowed list")
-            return jsonify({
-                "error": "Phone number not authorized", 
-                "message": "This phone number is not authorized to create tickets"
-            }), 403
+        # Check authorization and duplicates
+        auth_result = _check_authorization_and_duplicates(phone, event, call_id)
+        if auth_result[1]:  # Error response exists
+            return auth_result[1], auth_result[2]
         
-        event_call_key = f"{event}_{call_id}"
-        
-        # Check for duplicate processing using Firestore
-        if check_processed_call(event_call_key):
-            logging.info(f"Duplicate event-call pair detected: {event_call_key}, ignoring request.")
-            return jsonify({"message": "Duplicate event-call pair, ignored"}), 200
-        
-        # Store processed call
-        store_processed_call(event_call_key, event, call_id)
-
         if event not in ['call_started', 'call_ended']:
-            logging.info(f"Ignoring event: {event}")
+            safe_log_info(f"Ignoring event: {sanitize_for_logging(event)}")
             return jsonify({"error": "Not processing events other than call_started or call_ended"}), 200
 
         zendesk = ZendeskAPI()
 
         if event == 'call_started':
-            start_time = datetime.utcfromtimestamp(data['call']['start_timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-            
-            initial_description = f"""
-Ongoing Call Information:
-- Phone: {phone}
-- Call Start Time: {start_time}
-- Call Status: In Progress
-- Call ID: {call_id}
-
-Note: This ticket will be updated with full call details when the call ends.
-"""
-            
-            result = zendesk.create_ticket(
-                subject=f"Ongoing Call with {sanitized_phone}",
-                description=initial_description,
-                requester_phone=phone,
-                tags=["call", "insait-ai-agent", "in-progress"]
-            )
-            
-            if result and 'ticket' in result:
-                # Store active ticket in Firestore
-                store_active_ticket(phone, result['ticket']['id'])
-                logging.info(f"Created initial ticket {result['ticket']['id']} for {sanitized_phone}")
-                
-                # Get current active tickets for logging (without sensitive data)
-                current_active = get_all_active_tickets()
-                logging.info(f"Current active_tickets count in Firestore: {len(current_active)}")
-                
-                return jsonify({
-                    "message": "Initial ticket created successfully", 
-                    "ticket": result
-                }), 201
-            else:
-                logging.error("Failed to create initial Zendesk ticket")
-                return jsonify({"error": "Failed to create initial ticket"}), 500
-
+            return _handle_call_started(zendesk, data, phone, call_id)
         elif event == 'call_ended':
-            # Get active ticket from Firestore
-            ticket_id = get_active_ticket(phone)
-            current_active = get_all_active_tickets()
-            logging.info(f"Current active_tickets count at call_ended: {len(current_active)}")
-            
-            retry_count = 0
-            max_retries = 5
-            
-            while not ticket_id and retry_count < max_retries:
-                logging.info(f"Attempt {retry_count + 1}/{max_retries}: No active ticket found for phone number {sanitized_phone}")
-                time.sleep(10)
-                ticket_id = get_active_ticket(phone)
-                retry_count += 1
-                
-            if not ticket_id:
-                logging.info(f"No active ticket found for {sanitized_phone} after {max_retries} attempts, creating new ticket")
-                start_time = datetime.utcfromtimestamp(data['call']['start_timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-                end_time = datetime.utcfromtimestamp(data['call']['end_timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-                
-                description = f"""
-Completed Call Information:
-- Phone: {phone}
-- Call Start Time: {start_time}
-- Call End Time: {end_time}
-- Recording URL: {data['call'].get('recording_url', 'Not available')}
-- Transcript: {data['call'].get('transcript', 'Not available')}
-"""
-                result = zendesk.create_ticket(
-                    subject=f"Completed Call with {sanitized_phone}",
-                    description=description,
-                    requester_phone=phone,
-                    tags=["call", "insait-ai-agent", "completed"]
-                )
-            else:
-                logging.info(f"Found existing ticket {ticket_id} for phone number {sanitized_phone}, proceeding with update")
-                end_time = datetime.utcfromtimestamp(data['call']['end_timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S')
-                
-                update_description = f"""
-Call Completed - Updated Information:
-- Call End Time: {end_time}
-- Call Duration: {data['call']['duration_ms'] / 1000} seconds
-- Recording URL: {data['call'].get('recording_url', 'Not available')}
-- Transcript: {data['call'].get('transcript', 'Not available')}
-"""
-                
-                result = zendesk.update_ticket(
-                    ticket_id=ticket_id,
-                    subject=f"Completed Call with {sanitized_phone}",
-                    description=update_description,
-                    tags=["call", "insait-ai-agent", "completed"],
-                    status="open"
-                )
-                
-                # Remove active ticket from Firestore
-                remove_active_ticket(phone)
-                current_active = get_all_active_tickets()
-                logging.info(f"Removed ticket for {sanitized_phone}. Current active_tickets count: {len(current_active)}")
+            result = _handle_call_ended(zendesk, data, phone)
             
             if result:
-                logging.info(f"Successfully updated/created ticket for completed call")
+                safe_log_info("Successfully updated/created ticket for completed call")
                 return jsonify({
                     "message": "Ticket updated/created successfully", 
                     "ticket": result
                 }), 200
             else:
-                logging.error("Failed to update/create Zendesk ticket for completed call")
+                safe_log_error("Failed to update/create Zendesk ticket for completed call")
                 return jsonify({"error": "Failed to update/create ticket"}), 500
                 
     except Exception as e:
-        logging.error(f"Error processing Zendesk ticket: {str(e)}", exc_info=True)
+        safe_log_error(f"Error processing Zendesk ticket: {sanitize_for_logging(str(e))}", exc_info=True)
         return jsonify({"error": "Internal server error"}), 500
 
 @app.route("/test_zendesk_flow", methods=["GET"])
@@ -476,7 +540,7 @@ def test_zendesk_flow():
             }), 500
             
     except Exception as e:
-        logging.error(f"Error in Zendesk flow test: {str(e)}")
+        safe_log_error(f"Error in Zendesk flow test: {sanitize_for_logging(str(e))}")
         return jsonify({"error": "Test failed"}), 500
 
 @app.route("/health", methods=["GET"])
@@ -493,10 +557,10 @@ def health_check():
             "service": "zendesk-voice-server",
             "timestamp": datetime.now().isoformat(),
             "firestore": firestore_status,
-            "version": "2.0.0"
+            "version": "2.0.1"
         }), 200
     except Exception as e:
-        logging.error(f"Health check failed: {str(e)}")
+        safe_log_error(f"Health check failed: {sanitize_for_logging(str(e))}")
         return jsonify({
             "status": "unhealthy",
             "service": "zendesk-voice-server",
@@ -527,10 +591,8 @@ def method_not_allowed(error):
 @app.errorhandler(500)
 def internal_error(error):
     """Handle internal server error."""
-    logging.error(f"Internal server error: {str(error)}")
+    safe_log_error(f"Internal server error: {sanitize_for_logging(str(error))}")
     return jsonify({"error": "Internal server error"}), 500
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
-    debug_mode = os.getenv('FLASK_ENV') == 'development'
-    app.run(debug=debug_mode, host="0.0.0.0", port=port)
+# Production web applications should not include debug entry points
+# Use a proper WSGI server like Gunicorn instead

@@ -156,7 +156,7 @@ def sanitize_tags(tags: list) -> list:
     for tag in tags:
         if tag and isinstance(tag, str):
             # Remove special characters that might cause issues
-            clean_tag = re.sub(r'[^\w\-_]', '', tag.lower())
+            clean_tag = re.sub(r'[^\w\-]', '', tag.lower())
             if clean_tag and len(clean_tag) <= 50:  # Zendesk tag length limit
                 sanitized.append(clean_tag)
     

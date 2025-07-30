@@ -39,10 +39,10 @@ class TestingConfig(Config):
     """Testing configuration."""
     TESTING = True
     
-    # Use test credentials
-    ZENDESK_DOMAIN = 'test.zendesk.com'
-    ZENDESK_EMAIL = 'test@example.com'
-    ZENDESK_API_TOKEN = 'test-token'
+    # Use test credentials from environment variables for security
+    ZENDESK_DOMAIN = os.getenv('TEST_ZENDESK_DOMAIN', 'test.zendesk.com')
+    ZENDESK_EMAIL = os.getenv('TEST_ZENDESK_EMAIL', 'test@example.com')
+    ZENDESK_API_TOKEN = os.getenv('TEST_ZENDESK_API_TOKEN')  # Must be provided via environment
 
 
 # Configuration mapping

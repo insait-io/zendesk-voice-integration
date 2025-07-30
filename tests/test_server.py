@@ -144,7 +144,6 @@ class TestServerEndpoints(unittest.TestCase):
     @patch('server.app.ZendeskAPI')
     def test_call_events_manager_success(self, mock_zendesk_class, mock_firebase_ref):
         """Test successful call event processing."""
-        mock_firebase_instance = Mock()
         mock_firebase_ref.child.return_value.get.return_value = None
         mock_firebase_ref.child.return_value.set.return_value = None
         
@@ -172,7 +171,6 @@ class TestServerEndpoints(unittest.TestCase):
     @patch('server.app.processed_calls_ref')
     def test_call_events_manager_already_processed(self, mock_firebase_ref):
         """Test call event processing for already processed call."""
-        mock_firebase_instance = Mock()
         mock_firebase_ref.child.return_value.get.return_value = {
             "ticket_id": 12345,
             "processed_at": "2022-01-01T00:00:00"

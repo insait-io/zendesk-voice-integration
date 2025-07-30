@@ -2,14 +2,20 @@ import os
 import requests
 import logging
 import time
+import re
 from typing import List, Optional, Dict, Any
+from urllib.parse import quote
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# Disable debug logging in production
+if os.getenv('FLASK_ENV') != 'development':
+    logging.getLogger().setLevel(logging.WARNING)
 
 class ZendeskAPI:
     """
@@ -20,11 +26,65 @@ class ZendeskAPI:
     """
     
     def __init__(self):
-        self.domain = os.getenv('ZENDESK_DOMAIN', '')
-        self.email = os.getenv('ZENDESK_EMAIL', '')
-        self.api_token = os.getenv('ZENDESK_API_TOKEN', '')
+        self.domain = os.getenv('ZENDESK_DOMAIN', '').strip()
+        self.email = os.getenv('ZENDESK_EMAIL', '').strip()
+        self.api_token = os.getenv('ZENDESK_API_TOKEN', '').strip()
+        
+        # Validate required environment variables
+        if not all([self.domain, self.email, self.api_token]):
+            raise ValueError("Missing required Zendesk configuration: ZENDESK_DOMAIN, ZENDESK_EMAIL, or ZENDESK_API_TOKEN")
+        
+        # Validate domain format
+        if not re.match(r'^[a-zA-Z0-9-]+\.zendesk\.com$', self.domain):
+            raise ValueError("Invalid Zendesk domain format. Should be like 'yourcompany.zendesk.com'")
+        
+        # Ensure HTTPS
         self.base_url = f"https://{self.domain}/api/v2"
-        logging.info(f"Initialized ZendeskAPI with domain: {self.domain}")
+        
+        # Configure session with timeout and retry
+        self.session = requests.Session()
+        self.session.timeout = 30
+        
+        logging.info(f"Initialized ZendeskAPI with domain: {self._sanitize_domain(self.domain)}")
+
+    def _sanitize_domain(self, domain):
+        """Sanitize domain for logging."""
+        if len(domain) > 10:
+            return domain[:5] + "*" * (len(domain) - 10) + domain[-5:]
+        return "*" * len(domain)
+
+    def _sanitize_for_logging(self, data):
+        """Sanitize sensitive data for logging."""
+        if isinstance(data, dict):
+            sanitized = {}
+            for key, value in data.items():
+                if key.lower() in ['phone', 'email', 'name']:
+                    sanitized[key] = "***REDACTED***"
+                else:
+                    sanitized[key] = value
+            return sanitized
+        return data
+
+    def _validate_input(self, data):
+        """Validate input data for security."""
+        if isinstance(data, str):
+            # Check for potential injection attempts
+            suspicious_patterns = [
+                r'<script',
+                r'javascript:',
+                r'data:',
+                r'vbscript:',
+                r'onload=',
+                r'onerror=',
+                r'eval\(',
+                r'expression\(',
+            ]
+            
+            for pattern in suspicious_patterns:
+                if re.search(pattern, data, re.IGNORECASE):
+                    raise ValueError(f"Potentially malicious content detected")
+        
+        return True
 
     def create_ticket(
         self,
@@ -48,7 +108,23 @@ class ZendeskAPI:
             dict: Response from Zendesk API if successful, None if failed
         """
         url = f"{self.base_url}/tickets.json"
-        logging.info(f"Creating Zendesk ticket for requester: {requester_phone}")
+        
+        # Validate inputs
+        try:
+            self._validate_input(subject)
+            self._validate_input(description)
+            for tag in tags:
+                self._validate_input(tag)
+        except ValueError as e:
+            logging.error(f"Input validation failed: {e}")
+            return None
+        
+        # Validate phone number format
+        if not re.match(r'^\+\d{10,15}$', requester_phone):
+            logging.error("Invalid phone number format")
+            return None
+        
+        logging.info(f"Creating Zendesk ticket")
         logging.debug(f"Ticket subject: {subject}")
         logging.debug(f"Ticket tags: {tags}")
         
@@ -62,7 +138,7 @@ class ZendeskAPI:
             named_users = [u for u in users if u.get('name') and u.get('name').lower() != 'customer']
             if named_users:
                 selected_user = named_users[0]
-                logging.info(f"Selected named user: {selected_user.get('name')} (ID: {selected_user.get('id')})")
+                logging.info(f"Selected named user (ID: {selected_user.get('id')})")
             else:
                 # If no named users found, use the first user
                 selected_user = users[0]
@@ -71,12 +147,12 @@ class ZendeskAPI:
         # Prepare the ticket data
         data = {
             "ticket": {
-                "subject": subject,
+                "subject": subject[:255],  # Limit subject length
                 "comment": {
-                    "body": description,
+                    "body": description[:65535],  # Limit description length
                     "public": public
                 },
-                "tags": tags
+                "tags": tags[:10]  # Limit number of tags
             }
         }
 
@@ -93,31 +169,37 @@ class ZendeskAPI:
             }
         
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Insait-Voice-Integration/2.0"
         }
         
-        logging.debug(f"Request payload: {data}")
+        sanitized_data = self._sanitize_for_logging(data)
+        logging.debug(f"Request payload: {sanitized_data}")
         
         try:
             logging.info(f"Sending request to Zendesk API: {url}")
-            response = requests.post(
+            response = self.session.post(
                 url,
                 auth=(f"{self.email}/token", self.api_token),
                 headers=headers,
-                json=data
+                json=data,
+                timeout=30
             )
             logging.info(f"Zendesk API response status code: {response.status_code}")
-            logging.debug(f"Zendesk API response headers: {response.headers}")
-            logging.debug(f"Zendesk API response body: {response.content}")
             
             response.raise_for_status()
             response_data = response.json()
             logging.info(f"Successfully created Zendesk ticket with ID: {response_data.get('ticket', {}).get('id')}")
             return response_data
+        except requests.exceptions.Timeout:
+            logging.error("Request to Zendesk API timed out")
+            return None
         except requests.exceptions.RequestException as e:
             logging.error(f"Error creating Zendesk ticket: {str(e)}")
-            if hasattr(e.response, 'text'):
-                logging.error(f"Error response body: {e.response.text}")
+            if hasattr(e, 'response') and e.response is not None:
+                logging.error(f"Error response status: {e.response.status_code}")
+                if e.response.status_code < 500:  # Don't log server errors content
+                    logging.error(f"Error response body: {e.response.text[:1000]}")
             return None
 
     def update_ticket(
@@ -143,28 +225,49 @@ class ZendeskAPI:
         Returns:
             dict: Response from Zendesk API if successful, None if failed
         """
+        # Validate ticket_id
+        if not isinstance(ticket_id, int) or ticket_id <= 0:
+            logging.error("Invalid ticket ID")
+            return None
+        
         url = f"{self.base_url}/tickets/{ticket_id}.json"
         logging.info(f"Updating Zendesk ticket: {ticket_id}")
         
         # Initialize the ticket data
         data = {"ticket": {}}
         
-        # Add fields only if they are provided
+        # Validate and add fields only if they are provided
         if subject is not None:
-            data["ticket"]["subject"] = subject
-            logging.debug(f"Updating ticket subject: {subject}")
+            try:
+                self._validate_input(subject)
+                data["ticket"]["subject"] = subject[:255]  # Limit subject length
+                logging.debug(f"Updating ticket subject")
+            except ValueError as e:
+                logging.error(f"Subject validation failed: {e}")
+                return None
             
         if description is not None:
-            # For updates, comments must be added to a separate comment field
-            data["ticket"]["comment"] = {
-                "body": description,
-                "public": public
-            }
-            logging.debug(f"Adding new comment to ticket")
+            try:
+                self._validate_input(description)
+                # For updates, comments must be added to a separate comment field
+                data["ticket"]["comment"] = {
+                    "body": description[:65535],  # Limit description length
+                    "public": public
+                }
+                logging.debug(f"Adding new comment to ticket")
+            except ValueError as e:
+                logging.error(f"Description validation failed: {e}")
+                return None
             
         if tags is not None:
-            data["ticket"]["tags"] = tags
-            logging.debug(f"Updating ticket tags: {tags}")
+            for tag in tags:
+                try:
+                    self._validate_input(tag)
+                except ValueError as e:
+                    logging.error(f"Tag validation failed: {e}")
+                    return None
+            data["ticket"]["tags"] = tags[:10]  # Limit number of tags
+            logging.debug(f"Updating ticket tags")
             
         if status is not None:
             valid_statuses = ['open', 'pending', 'solved', 'closed']
@@ -175,31 +278,35 @@ class ZendeskAPI:
             logging.debug(f"Updating ticket status: {status}")
         
         headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Insait-Voice-Integration/2.0"
         }
         
-        logging.debug(f"Request payload: {data}")
+        sanitized_data = self._sanitize_for_logging(data)
+        logging.debug(f"Request payload: {sanitized_data}")
         
         try:
             logging.info(f"Sending PUT request to Zendesk API: {url}")
-            response = requests.put(
+            response = self.session.put(
                 url,
                 auth=(f"{self.email}/token", self.api_token),
                 headers=headers,
-                json=data
+                json=data,
+                timeout=30
             )
             logging.info(f"Zendesk API response status code: {response.status_code}")
-            logging.debug(f"Zendesk API response headers: {response.headers}")
-            logging.debug(f"Zendesk API response body: {response.content}")
             
             response.raise_for_status()
             response_data = response.json()
             logging.info(f"Successfully updated Zendesk ticket {ticket_id}")
             return response_data
+        except requests.exceptions.Timeout:
+            logging.error("Update request to Zendesk API timed out")
+            return None
         except requests.exceptions.RequestException as e:
             logging.error(f"Error updating Zendesk ticket: {str(e)}")
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                logging.error(f"Error response body: {e.response.text}")
+            if hasattr(e, 'response') and e.response is not None and e.response.status_code < 500:
+                logging.error(f"Error response body: {e.response.text[:1000]}")
             return None
 
     def search_user_by_phone(self, phone_number: str) -> List[Dict[str, Any]]:
@@ -212,22 +319,37 @@ class ZendeskAPI:
         Returns:
             List of user dictionaries if found, empty list if not found or error
         """
+        # Validate phone number format first
+        if not re.match(r'^\+\d{10,15}$', phone_number):
+            logging.error("Invalid phone number format for search")
+            return []
+        
         # Remove non-numeric characters from phone number (spaces, dashes, etc.)
         clean_phone = ''.join(filter(str.isdigit, phone_number.replace('+', '')))
         
+        # URL encode the search query to prevent injection
+        search_query = f"type:user phone:{clean_phone}"
+        encoded_query = quote(search_query)
+        
         url = f"{self.base_url}/search.json"
         params = {
-            "query": f"type:user phone:{clean_phone}"
+            "query": search_query
         }
         
-        logging.info(f"Searching for Zendesk user with phone: {phone_number}")
+        headers = {
+            "User-Agent": "Insait-Voice-Integration/2.0"
+        }
+        
+        logging.info(f"Searching for Zendesk user")
         logging.debug(f"Clean phone number for search: {clean_phone}")
         
         try:
-            response = requests.get(
+            response = self.session.get(
                 url,
                 auth=(f"{self.email}/token", self.api_token),
-                params=params
+                params=params,
+                headers=headers,
+                timeout=30
             )
             logging.info(f"Zendesk API search response status code: {response.status_code}")
             
@@ -235,19 +357,25 @@ class ZendeskAPI:
             data = response.json()
             users = data.get('results', [])
             
+            # Limit the number of returned users for security
+            users = users[:10]
+            
             if users:
-                logging.info(f"Found {len(users)} user(s) with phone number {phone_number}")
+                logging.info(f"Found {len(users)} user(s)")
                 for user in users:
-                    logging.debug(f"Found user: {user.get('name', 'N/A')} (ID: {user.get('id', 'N/A')})")
+                    logging.debug(f"Found user ID: {user.get('id', 'N/A')}")
             else:
-                logging.info(f"No users found with phone number {phone_number}")
+                logging.info(f"No users found")
             
             return users
             
+        except requests.exceptions.Timeout:
+            logging.error("Search request to Zendesk API timed out")
+            return []
         except requests.exceptions.RequestException as e:
             logging.error(f"Error searching Zendesk users: {str(e)}")
-            if hasattr(e, 'response') and hasattr(e.response, 'text'):
-                logging.error(f"Error response body: {e.response.text}")
+            if hasattr(e, 'response') and e.response is not None and e.response.status_code < 500:
+                logging.error(f"Error response body: {e.response.text[:1000]}")
             return []
 
     def get_user_name_by_phone(self, phone_number: str) -> Optional[str]:

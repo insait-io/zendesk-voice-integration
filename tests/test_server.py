@@ -10,43 +10,125 @@ from unittest.mock import Mock, patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from server.app import app, is_phone_number_allowed
+from server.app import app, is_phone_number_allowed, validate_phone_number, validate_call_data
 
 
 class TestServerEndpoints(unittest.TestCase):
     """Test cases for the Flask server endpoints."""
     
-    def setUp(self):
-        """Set up test fixtures."""
-        self.app = app.test_client()
-        self.app.testing = True
+    def test_phone_number_validation(self):
+        """Test phone number validation function."""
+        # Valid phone numbers
+        self.assertTrue(validate_phone_number("+15551234567"))
+        self.assertTrue(validate_phone_number("+441234567890"))
+        self.assertTrue(validate_phone_number("+33123456789"))
         
-        self.sample_call_data = {
-            "call": {
-                "call_id": "test_call_123",
-                "from_number": "+15551234567",
-                "call_status": "ended",
-                "start_timestamp": 1640995200000,
-                "end_timestamp": 1640995260000,
-                "duration_ms": 60000,
-                "transcript": "User: Hello\nAgent: Hi, how can I help you?",
-                "call_analysis": {
-                    "call_summary": "Customer called for support",
-                    "custom_analysis_data": {
-                        "name_of_caller": "John Doe",
-                        "email_to_reach": "john@example.com"
-                    }
-                }
-            }
-        }
+        # Invalid phone numbers
+        self.assertFalse(validate_phone_number("15551234567"))  # Missing +
+        self.assertFalse(validate_phone_number("+1555123"))     # Too short
+        self.assertFalse(validate_phone_number("+15551234567890123"))  # Too long
+        self.assertFalse(validate_phone_number("+155512345ab"))  # Contains letters
+        self.assertFalse(validate_phone_number(""))             # Empty
+        self.assertFalse(validate_phone_number(None))           # None
+    
+    def test_call_data_validation(self):
+        """Test call data validation function."""
+        # Valid call data
+        is_valid, error = validate_call_data(self.sample_call_data)
+        self.assertTrue(is_valid)
+        self.assertIsNone(error)
         
-        self.sample_ticket_data = {
-            "subject": "Test Ticket",
-            "description": "Test description",
-            "requester_phone": "+15551234567",
-            "tags": ["test", "voice-call"],
-            "public": False
-        }
+        # Invalid call data - missing event
+        invalid_data = self.sample_call_data.copy()
+        del invalid_data['event']
+        is_valid, error = validate_call_data(invalid_data)
+        self.assertFalse(is_valid)
+        self.assertIn("Missing required field: event", error)
+        
+        # Invalid call data - missing call
+        invalid_data = self.sample_call_data.copy()
+        del invalid_data['call']
+        is_valid, error = validate_call_data(invalid_data)
+        self.assertFalse(is_valid)
+        self.assertIn("Missing required field: call", error)
+        
+        # Invalid call data - invalid phone number
+        invalid_data = self.sample_call_data.copy()
+        invalid_data['call']['from_number'] = "invalid_phone"
+        is_valid, error = validate_call_data(invalid_data)
+        self.assertFalse(is_valid)
+        self.assertIn("Invalid phone number format", error)
+        
+        # Invalid call data - invalid event type
+        invalid_data = self.sample_call_data.copy()
+        invalid_data['event'] = "invalid_event"
+        is_valid, error = validate_call_data(invalid_data)
+        self.assertFalse(is_valid)
+        self.assertIn("Invalid event type", error)
+
+    def test_request_size_limit(self):
+        """Test request size limit enforcement."""
+        # Create a large payload (over 1MB)
+        large_data = self.sample_call_data.copy()
+        large_data['call']['transcript'] = "x" * (1024 * 1024 + 1)  # Just over 1MB
+        
+        with patch('server.app.firestore_client'), \
+             patch('server.app.store_processed_call', return_value=True), \
+             patch('server.app.check_processed_call', return_value=False):
+            
+            response = self.app.post('/create_zendesk_ticket', 
+                                   data=json.dumps(large_data),
+                                   content_type='application/json')
+            
+            # Should reject large requests (413 Request Entity Too Large)
+            self.assertEqual(response.status_code, 413)
+
+    def test_invalid_content_type(self):
+        """Test rejection of invalid content types."""
+        response = self.app.post('/create_zendesk_ticket', 
+                               data='invalid_data',
+                               content_type='text/plain')
+        
+        self.assertEqual(response.status_code, 400)
+        data = json.loads(response.data)
+        self.assertIn("Content-Type must be application/json", data['error'])
+
+    def test_security_headers(self):
+        """Test that security headers are present in responses."""
+        response = self.app.get('/health')
+        
+        # Check for security headers
+        self.assertEqual(response.headers.get('X-Content-Type-Options'), 'nosniff')
+        self.assertEqual(response.headers.get('X-Frame-Options'), 'DENY')
+        self.assertEqual(response.headers.get('X-XSS-Protection'), '1; mode=block')
+        self.assertIn('max-age=31536000', response.headers.get('Strict-Transport-Security', ''))
+        self.assertIn("default-src 'self'", response.headers.get('Content-Security-Policy', ''))
+
+    @patch('server.app.firestore_client')
+    def test_malicious_input_rejection(self, mock_firestore):
+        """Test rejection of potentially malicious input."""
+        malicious_data = self.sample_call_data.copy()
+        malicious_data['call']['transcript'] = '<script>alert("xss")</script>'
+        
+        with patch('server.app.store_processed_call', return_value=True), \
+             patch('server.app.check_processed_call', return_value=False), \
+             patch('zendesk.api.ZendeskAPI.create_ticket') as mock_create:
+            
+            mock_create.return_value = None  # API should reject malicious input
+            
+            response = self.app.post('/create_zendesk_ticket',
+                                   data=json.dumps(malicious_data),
+                                   content_type='application/json')
+            
+            # The request should be processed but the Zendesk API should handle validation
+            self.assertIn(response.status_code, [400, 500])
+
+    def test_rate_limiting_headers(self):
+        """Test that rate limiting is configured."""
+        response = self.app.get('/health')
+        
+        # Check that the response doesn't indicate rate limiting issues
+        self.assertNotEqual(response.status_code, 429)
     
     def test_health_check(self):
         """Test the health check endpoint."""

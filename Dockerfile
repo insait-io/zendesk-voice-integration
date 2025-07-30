@@ -1,37 +1,52 @@
-FROM python:3.9-slim
+FROM python:3.11-slim
 
-# Set environment variables
+# Set environment variables for security and performance
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/src
+ENV PORT=8080
 
 # Set work directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and security updates
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         gcc \
         g++ \
-    && rm -rf /var/lib/apt/lists/*
+        curl \
+        ca-certificates \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create non-root user first
+RUN addgroup --system --gid 1001 appgroup \
+    && adduser --system --uid 1001 --gid 1001 --no-create-home --disabled-password appuser
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt \
+    && pip check
 
-# Copy project
+# Copy project files
 COPY . .
 
-# Create non-root user
-RUN adduser --disabled-password --gecos '' appuser
-RUN chown -R appuser:appuser /app
+# Set proper permissions
+RUN chown -R appuser:appgroup /app \
+    && chmod -R 755 /app \
+    && chmod 644 /app/requirements.txt
+
+# Switch to non-root user
 USER appuser
 
-# Expose port (Cloud Run will set PORT environment variable)
+# Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:$PORT/health || exit 1
+# Health check with proper error handling
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
 
-# Run the application (use PORT environment variable for Cloud Run compatibility)
-CMD gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 300 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 app:app
+# Run the application with production settings
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT} --workers 2 --threads 4 --timeout 300 --keep-alive 5 --max-requests 1000 --max-requests-jitter 100 --preload --log-level info --access-logfile - --error-logfile - app:app"]

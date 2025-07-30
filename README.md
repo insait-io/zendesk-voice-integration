@@ -14,17 +14,30 @@
 
 # Zendesk Voice Server
 
-A Flask-based server for automatically creating Zendesk tickets from voice call events. This application integrates with voice call services to process call data and create support tickets in Zendesk.
+A secure Flask-based server for automatically creating Zendesk tickets from voice call events. This application integrates with voice call services to process call data and create support tickets in Zendesk with enterprise-grade security features.
 
 ## Features
 
 - **Automatic Ticket Creation**: Creates Zendesk tickets from voice call events
+- **Enhanced Security**: Comprehensive security measures including rate limiting, input validation, and HTTPS enforcement
 - **Phone Number Filtering**: Optional restriction of API access to authorized phone numbers
 - **User Management**: Handles existing and new users based on phone numbers
-- **Call Processing**: Processes completed calls and extracts relevant information
-- **Firebase Integration**: Stores processed calls and active tickets
-- **Comprehensive Logging**: Detailed logging for debugging and monitoring
-- **RESTful API**: Clean API endpoints for call processing and ticket management
+- **Call Processing**: Processes call start/end events with duplicate detection
+- **Firestore Integration**: Secure cloud-native storage for processed calls and active tickets
+- **Comprehensive Logging**: Detailed logging with data sanitization for privacy
+- **RESTful API**: Clean, secure API endpoints with proper error handling
+- **Production Ready**: Enterprise-grade security and deployment configuration
+
+## Security Features
+
+- **Input Validation**: Comprehensive validation and sanitization of all inputs
+- **Rate Limiting**: Configurable rate limits to prevent abuse
+- **Security Headers**: Full suite of security headers for web protection
+- **Data Sanitization**: Phone numbers and sensitive data are masked in logs
+- **Request Size Limits**: Protection against large payload attacks
+- **Content Type Validation**: Strict JSON content type enforcement
+- **Authentication Support**: Ready for production authentication integration
+- **Secret Management**: Google Secret Manager integration for sensitive data
 
 ## Project Structure
 
@@ -33,18 +46,19 @@ zendesk-voice-server/
 ├── src/
 │   ├── zendesk/
 │   │   ├── __init__.py
-│   │   └── api.py              # Zendesk API client
+│   │   └── api.py              # Secure Zendesk API client
 │   ├── server/
 │   │   ├── __init__.py
-│   │   └── app.py              # Flask application
+│   │   └── app.py              # Secure Flask application
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   └── helpers.py          # Utility functions
+│   │   ├── helpers.py          # Utility functions
+│   │   └── security.py         # Security configuration
 │   └── __init__.py
 ├── tests/
 │   ├── __init__.py
 │   ├── test_zendesk_api.py     # Zendesk API tests
-│   ├── test_server.py          # Server endpoint tests
+│   ├── test_server.py          # Server endpoint and security tests
 │   └── test_utils.py           # Utility function tests
 ├── config/
 │   └── settings.py             # Configuration settings
@@ -87,38 +101,48 @@ zendesk-voice-server/
    ZENDESK_EMAIL=your-email@example.com
    ZENDESK_API_TOKEN=your-api-token
    
-   # Firebase Configuration
-   FIREBASE_CREDENTIALS_FILE=firebase-credentials.json
-   FIREBASE_DATABASE_URL=your-firebase-url
+   # Google Cloud Configuration
+   GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account-key.json
+   GOOGLE_CLOUD_PROJECT=your-gcp-project-id
    
    # Server Configuration
-   PORT=5000
+   PORT=8080
+   FLASK_ENV=production
    
-   # Phone Number Filtering (Optional)
-   # Restrict API access to specific phone numbers
-   # If not set, all phone numbers are allowed
+   # Security Configuration
    ALLOWED_PHONE_NUMBERS=+15551234567,+15559876543
    ```
 
-5. **Set up Firebase credentials**:
-   Place your `firebase-credentials.json` file in the root directory.
+5. **Set up Google Cloud Firestore**:
+   - Create a Google Cloud Project
+   - Enable Firestore API
+   - Create a service account with Firestore permissions
+   - Download the service account key JSON file
 
 ## Security
 
-⚠️ **Important Security Notes**:
+⚠️ **Enhanced Security Features**:
 
-- **Never commit sensitive files**: The `.gitignore` file is configured to exclude:
-  - `.env` files (environment variables)
-  - `firebase-credentials.json` (Firebase service account key)
-  - `venv/` directory (virtual environment)
-  - `__pycache__/` directories
-  - Log files
+- **Input Validation**: All inputs are validated and sanitized
+- **Rate Limiting**: Built-in protection against abuse and DoS attacks
+- **Security Headers**: Comprehensive HTTP security headers
+- **Data Sanitization**: Sensitive data is masked in logs and outputs
+- **Secret Management**: Integration with Google Secret Manager
+- **HTTPS Enforcement**: Secure communication protocols
+- **Authentication Ready**: Prepared for production authentication
 
-- **Environment Variables**: Always use environment variables for sensitive data like API tokens, passwords, and service account keys.
+**Security Files to Protect**:
+- `.env` files (environment variables)
+- Service account JSON files
+- `venv/` directory (virtual environment)
+- Log files containing sensitive data
 
-- **Firebase Credentials**: Keep your Firebase service account key secure and never share it publicly.
-
-- **Production Deployment**: In production, use proper secret management systems and ensure all sensitive data is stored securely.
+**Production Security Requirements**:
+- Use Google Secret Manager for sensitive data
+- Enable authentication on all endpoints
+- Configure VPC networking for internal communication
+- Set up monitoring and alerting
+- Regular security updates and vulnerability scanning
 
 ## Usage
 
@@ -126,12 +150,14 @@ zendesk-voice-server/
 
 **Development mode**:
 ```bash
+export FLASK_ENV=development
 python app.py
 ```
 
-**Production mode**:
+**Production mode** (using gunicorn):
 ```bash
-gunicorn -w 4 -b 0.0.0.0:5000 app:app
+export FLASK_ENV=production
+gunicorn -w 4 -b 0.0.0.0:8080 --timeout 300 --keep-alive 5 app:app
 ```
 
 ### API Endpoints

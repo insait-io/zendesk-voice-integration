@@ -1,0 +1,76 @@
+displayName: "Zendesk Voice Server Monitoring"
+documentation:
+  content: "Monitoring policy for Zendesk Voice Integration Server"
+  mimeType: "text/markdown"
+combiner: OR
+conditions:
+  - displayName: "High Error Rate"
+    conditionThreshold:
+      filter: 'resource.type="cloud_run_revision" AND resource.labels.service_name="zendesk-voice-server"'
+      comparison: COMPARISON_GREATER_THAN
+      thresholdValue: 0.1
+      duration: "300s"
+      aggregations:
+        - alignmentPeriod: "300s"
+          perSeriesAligner: ALIGN_RATE
+          crossSeriesReducer: REDUCE_MEAN
+          groupByFields:
+            - "resource.labels.service_name"
+    documentation:
+      content: "Error rate is above 10% for 5 minutes"
+      mimeType: "text/markdown"
+
+  - displayName: "High Response Time"
+    conditionThreshold:
+      filter: 'resource.type="cloud_run_revision" AND resource.labels.service_name="zendesk-voice-server"'
+      comparison: COMPARISON_GREATER_THAN
+      thresholdValue: 5000
+      duration: "300s"
+      aggregations:
+        - alignmentPeriod: "300s"
+          perSeriesAligner: ALIGN_MEAN
+          crossSeriesReducer: REDUCE_MEAN
+          groupByFields:
+            - "resource.labels.service_name"
+    documentation:
+      content: "Average response time is above 5 seconds for 5 minutes"
+      mimeType: "text/markdown"
+
+  - displayName: "Low CPU Utilization" 
+    conditionThreshold:
+      filter: 'resource.type="cloud_run_revision" AND resource.labels.service_name="zendesk-voice-server"'
+      comparison: COMPARISON_LESS_THAN
+      thresholdValue: 0.01
+      duration: "1800s"
+      aggregations:
+        - alignmentPeriod: "600s"
+          perSeriesAligner: ALIGN_MEAN
+          crossSeriesReducer: REDUCE_MEAN
+          groupByFields:
+            - "resource.labels.service_name"
+    documentation:
+      content: "CPU utilization is below 1% for 30 minutes (potential service down)"
+      mimeType: "text/markdown"
+
+  - displayName: "Memory Usage High"
+    conditionThreshold:
+      filter: 'resource.type="cloud_run_revision" AND resource.labels.service_name="zendesk-voice-server"'
+      comparison: COMPARISON_GREATER_THAN
+      thresholdValue: 0.8
+      duration: "600s"
+      aggregations:
+        - alignmentPeriod: "300s"
+          perSeriesAligner: ALIGN_MEAN
+          crossSeriesReducer: REDUCE_MEAN
+          groupByFields:
+            - "resource.labels.service_name"
+    documentation:
+      content: "Memory usage is above 80% for 10 minutes"
+      mimeType: "text/markdown"
+
+notificationChannels:
+  # Add your notification channels here
+  # Example: "projects/PROJECT_ID/notificationChannels/CHANNEL_ID"
+
+alertStrategy:
+  autoClose: "86400s"  # Auto-close after 24 hours
